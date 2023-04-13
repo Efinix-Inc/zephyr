@@ -1,0 +1,18 @@
+# Rules file for Efinix programmer USB HID access (Linux)
+#
+# utilizing HIDAPI/libusb implementation
+#
+# USB device is recognized as Atmel HID DEMO
+
+SUBSYSTEM=="usb", ATTRS{idVendor}=="03eb", ATTRS{idProduct}=="2013", MODE="0666"
+SUBSYSTEM=="usb_device", ATTRS{idVendor}=="03eb", ATTRS{idProduct}=="2013", MODE="0666"
+
+# for FTDI cable, FT232H chip
+SUBSYSTEM=="usb", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6014", MODE="666", GROUP="plugdev"
+
+# FTDI other
+SUBSYSTEM=="usb", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6010", MODE="666", GROUP="plugdev"
+
+# FT4232H
+SUBSYSTEM=="usb", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6011", MODE="666", GROUP="plugdev"
+
