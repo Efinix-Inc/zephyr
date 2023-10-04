@@ -6,7 +6,6 @@
 
 #define DT_DRV_COMPAT efinix_sapphire_gpio
 
-#include "gpio_efinix_sapphire_priv.h"
 #include <zephyr/drivers/gpio/gpio_utils.h>
 
 #include <errno.h>
@@ -18,16 +17,22 @@
 #include <zephyr/sys/util.h>
 #include <zephyr/types.h>
 
-#include <soc.h>
-
 LOG_MODULE_REGISTER(gpio_efinix_sapphire);
 
 #define SUPPORTED_FLAGS                                                                            \
 	(GPIO_INPUT | GPIO_OUTPUT | GPIO_OUTPUT_INIT_LOW | GPIO_OUTPUT_INIT_HIGH |                 \
-	 GPIO_ACTIVE_LOW | GPIO_ACTIVE_HIGH)
+	 GPIO_ACTIVE_LOW | GPIO_ACTIVE_HIGH | GPIO_PULL_UP | GPIO_PULL_DOWN)
 
 #define GPIO_LOW  0
 #define GPIO_HIGH 1
+
+#define BSP_GPIO_INPUT		       0x00
+#define BSP_GPIO_OUTPUT		       0x04
+#define BSP_GPIO_OUTPUT_ENABLE	       0x08
+#define BSP_GPIO_INTERRUPT_RISE_ENABLE 0x20
+#define BSP_GPIO_INTERRUPT_FALL_ENABLE 0x24
+#define BSP_GPIO_INTERRUPT_HIGH_ENABLE 0x28
+#define BSP_GPIO_INTERRUPT_LOW_ENABLE  0x2c
 
 /* efinix sapphire specefic gpio config struct */
 struct gpio_efinix_sapphire_cfg {
@@ -44,20 +49,21 @@ struct gpio_efinix_sapphire_data {
 };
 
 /* Device access pointer helpers */
-#define DEV_GPIO_CFG(dev) ((const struct gpio_efinix_sapphire_cfg *)(dev)->config)
-#define GPIO_OUTPUT_ADDR  config->base_addr + BSP_GPIO_OUTPUT
+#define DEV_GPIO_CFG(dev)  ((const struct gpio_efinix_sapphire_cfg *)(dev)->config)
+#define DEV_GPIO_DATA(dev) ((struct gpio_efinix_sapphire_data *)(dev)->data)
+#define GPIO_OUTPUT_ADDR   config->base_addr + BSP_GPIO_OUTPUT
 
 static inline void cfg_output_enable_bit(const struct gpio_efinix_sapphire_cfg *config,
 					 gpio_pin_t pin, uint32_t type)
 {
 
 #define GPIO_OUTPUT_ENABLE_ADDR config->base_addr + BSP_GPIO_OUTPUT_ENABLE
-	uint32_t c_reg_val = sapphire_read32(GPIO_OUTPUT_ENABLE_ADDR);
+	uint32_t c_reg_val = sys_read32(GPIO_OUTPUT_ENABLE_ADDR);
 
 	if (type == GPIO_INPUT) {
-		sapphire_write32(GPIO_OUTPUT_ENABLE_ADDR, c_reg_val &= ~pin);
+		sys_write32(c_reg_val &= ~pin, GPIO_OUTPUT_ENABLE_ADDR);
 	} else if (type == GPIO_OUTPUT) {
-		sapphire_write32(GPIO_OUTPUT_ENABLE_ADDR, c_reg_val |= pin);
+		sys_write32(c_reg_val |= pin, GPIO_OUTPUT_ENABLE_ADDR);
 	}
 }
 
@@ -65,12 +71,12 @@ static inline void cfg_output_bit(const struct gpio_efinix_sapphire_cfg *config,
 				  uint32_t value)
 {
 
-	uint32_t c_reg_val = sapphire_read32(GPIO_OUTPUT_ADDR);
+	uint32_t c_reg_val = sys_read32(GPIO_OUTPUT_ADDR);
 
 	if (value == GPIO_LOW) {
-		sapphire_write32(GPIO_OUTPUT_ADDR, c_reg_val &= ~pin);
+		sys_write32(c_reg_val &= ~pin, GPIO_OUTPUT_ADDR);
 	} else if (value == GPIO_HIGH) {
-		sapphire_write32(GPIO_OUTPUT_ADDR, c_reg_val |= pin);
+		sys_write32(c_reg_val |= pin, GPIO_OUTPUT_ADDR);
 	}
 }
 
@@ -82,9 +88,8 @@ static int gpio_efinix_sapphire_config(const struct device *dev, gpio_pin_t pin,
 	const struct gpio_efinix_sapphire_cfg *config = DEV_GPIO_CFG(dev);
 	/* Check if the controller supports the requested GPIO configuration.  */
 	if (flags & ~SUPPORTED_FLAGS) {
-		return -ENOTSUP;
+		return -EINVAL;
 	}
-
 	if ((flags & GPIO_OUTPUT) && (flags & GPIO_INPUT)) {
 		/* Pin cannot be configured as input and output */
 		return -ENOTSUP;
@@ -124,23 +129,21 @@ static int gpio_efinix_sapphire_config(const struct device *dev, gpio_pin_t pin,
 
 static inline uint32_t get_port(const struct gpio_efinix_sapphire_cfg *config)
 {
-	uint32_t c_reg_val = sapphire_read32(GPIO_OUTPUT_ADDR);
+	uint32_t c_reg_val = sys_read32(GPIO_OUTPUT_ADDR);
 
 	return (c_reg_val & BIT_MASK(config->n_gpios));
 }
 
-static inline uint32_t set_port(const struct gpio_efinix_sapphire_cfg *config, uint32_t value)
+static inline void set_port(const struct gpio_efinix_sapphire_cfg *config, uint32_t value)
 {
-	sapphire_write32(GPIO_OUTPUT_ADDR, value);
-
-	return 0;
+	sys_write32(value, GPIO_OUTPUT_ADDR);
 }
 
 static int gpio_efinix_sapphire_port_get_raw(const struct device *dev, gpio_port_value_t *value)
 {
 	const struct gpio_efinix_sapphire_cfg *config = DEV_GPIO_CFG(dev);
 
-	*value = get_port(config);
+	*value = sys_read32(config->base_addr);
 	return 0;
 }
 
@@ -206,15 +209,43 @@ static int gpio_efinix_sapphire_init(const struct device *dev)
 {
 	const struct gpio_efinix_sapphire_cfg *config = DEV_GPIO_CFG(dev);
 
-	/* Need to do something to init? */
-	/* Can be used for DT data validation */
-
-	if (config->n_gpios > 4) {
+	if (config->n_gpios > 16) {
 		return -EINVAL;
 	}
 	return 0;
 }
+static int gpio_efinix_sapphire_pin_interrupt_configure(const struct device *dev, gpio_pin_t pin,
+							enum gpio_int_mode mode,
+							enum gpio_int_trig trig)
+{
+	const struct gpio_efinix_sapphire_cfg *config = DEV_GPIO_CFG(dev);
+#define BASE_ADDRESS config->base_addr
+	if (mode == GPIO_INT_MODE_DISABLED) {
+		return 0;
+	}
+	if (mode == GPIO_INT_MODE_LEVEL) {
+		if (trig == GPIO_INT_TRIG_HIGH) {
+			sys_set_bit(BASE_ADDRESS + BSP_GPIO_INTERRUPT_HIGH_ENABLE, pin);
+		} else if (trig == GPIO_INT_TRIG_LOW) {
+			sys_set_bit(BASE_ADDRESS + BSP_GPIO_INTERRUPT_LOW_ENABLE, pin);
+		}
+	} else if (mode == GPIO_INT_MODE_EDGE) {
+		if (trig == GPIO_INT_HIGH_1) {
+			sys_set_bit(BASE_ADDRESS + BSP_GPIO_INTERRUPT_RISE_ENABLE, pin);
+		} else if (trig == GPIO_INT_LOW_0) {
+			sys_set_bit(BASE_ADDRESS + BSP_GPIO_INTERRUPT_FALL_ENABLE, pin);
+		}
+	}
+	return 0;
+}
 
+static int gpio_efinix_sapphire_manage_callback(const struct device *dev,
+						struct gpio_callback *callback, bool set)
+{
+	struct gpio_efinix_sapphire_data *data = DEV_GPIO_DATA(dev);
+	gpio_manage_callback(&data->cb, callback, set);
+	return 0;
+}
 /* API map */
 static const struct gpio_driver_api gpio_efinix_sapphire_api = {
 	.pin_configure = gpio_efinix_sapphire_config,
@@ -223,22 +254,18 @@ static const struct gpio_driver_api gpio_efinix_sapphire_api = {
 	.port_set_bits_raw = gpio_efinix_sapphire_port_set_bits_raw,
 	.port_clear_bits_raw = gpio_efinix_sapphire_port_clear_bits_raw,
 	.port_toggle_bits = gpio_efinix_sapphire_port_toggle_bits,
+	.pin_interrupt_configure = gpio_efinix_sapphire_pin_interrupt_configure,
+	.manage_callback = gpio_efinix_sapphire_manage_callback,
 };
 
-#define GPIO_EFINIX_SAPPHIRE_INIT(n) \
-	static struct gpio_efinix_sapphire_cfg gpio_efinix_sapphire_cfg_##n = { \
-		.base_addr = DT_INST_REG_ADDR(n), \
-		.n_gpios = DT_INST_PROP(n, ngpios), \
-}; \
-static struct gpio_efinix_sapphire_data gpio_efinix_sapphire_data_##n; \
-	DEVICE_DT_INST_DEFINE(n, \
-			    gpio_efinix_sapphire_init, \
-			    NULL, \
-			    &gpio_efinix_sapphire_data_##n, \
-			    &gpio_efinix_sapphire_cfg_##n, \
-			    POST_KERNEL, \
-			    CONFIG_GPIO_INIT_PRIORITY, \
-			    &gpio_efinix_sapphire_api \
-				); \
+#define GPIO_EFINIX_SAPPHIRE_INIT(n)                                                               \
+	static struct gpio_efinix_sapphire_cfg gpio_efinix_sapphire_cfg_##n = {                    \
+		.base_addr = DT_INST_REG_ADDR(n),                                                  \
+		.n_gpios = DT_INST_PROP(n, ngpios),                                                \
+	};                                                                                         \
+	static struct gpio_efinix_sapphire_data gpio_efinix_sapphire_data_##n;                     \
+	DEVICE_DT_INST_DEFINE(n, gpio_efinix_sapphire_init, NULL, &gpio_efinix_sapphire_data_##n,  \
+			      &gpio_efinix_sapphire_cfg_##n, POST_KERNEL,                          \
+			      CONFIG_GPIO_INIT_PRIORITY, &gpio_efinix_sapphire_api);
 
 DT_INST_FOREACH_STATUS_OKAY(GPIO_EFINIX_SAPPHIRE_INIT)
