@@ -21,7 +21,7 @@ LOG_MODULE_REGISTER(gpio_efinix_sapphire);
 
 #define SUPPORTED_FLAGS                                                                            \
 	(GPIO_INPUT | GPIO_OUTPUT | GPIO_OUTPUT_INIT_LOW | GPIO_OUTPUT_INIT_HIGH |                 \
-	 GPIO_ACTIVE_LOW | GPIO_ACTIVE_HIGH)
+	 GPIO_ACTIVE_LOW | GPIO_ACTIVE_HIGH | GPIO_PULL_UP | GPIO_PULL_DOWN)
 
 #define GPIO_LOW  0
 #define GPIO_HIGH 1
@@ -49,8 +49,9 @@ struct gpio_efinix_sapphire_data {
 };
 
 /* Device access pointer helpers */
-#define DEV_GPIO_CFG(dev) ((const struct gpio_efinix_sapphire_cfg *)(dev)->config)
-#define GPIO_OUTPUT_ADDR  config->base_addr + BSP_GPIO_OUTPUT
+#define DEV_GPIO_CFG(dev)  ((const struct gpio_efinix_sapphire_cfg *)(dev)->config)
+#define DEV_GPIO_DATA(dev) ((struct gpio_efinix_sapphire_data *)(dev)->data)
+#define GPIO_OUTPUT_ADDR   config->base_addr + BSP_GPIO_OUTPUT
 
 static inline void cfg_output_enable_bit(const struct gpio_efinix_sapphire_cfg *config,
 					 gpio_pin_t pin, uint32_t type)
@@ -87,14 +88,23 @@ static int gpio_efinix_sapphire_config(const struct device *dev, gpio_pin_t pin,
 	const struct gpio_efinix_sapphire_cfg *config = DEV_GPIO_CFG(dev);
 	/* Check if the controller supports the requested GPIO configuration.  */
 	if (flags & ~SUPPORTED_FLAGS) {
+		return -EINVAL;
+	}
+	if ((flags & GPIO_OUTPUT) && (flags & GPIO_INPUT)) {
+		/* Pin cannot be configured as input and output */
+		return -ENOTSUP;
+	} else if (!(flags & (GPIO_INPUT | GPIO_OUTPUT))) {
+		/* Pin has to be configured as input or output */
 		return -ENOTSUP;
 	}
 
-	if ((flags & GPIO_DIR_MASK) == GPIO_DIR_MASK) {
-		/* Pin cannot be configured as input and output */
+	if ((flags & GPIO_OUTPUT_INIT_LOW) && (flags & GPIO_OUTPUT_INIT_HIGH)) {
+		/* Pin cannot be configured as output with both initial states */
 		return -ENOTSUP;
-	} else if ((flags & GPIO_DIR_MASK) == GPIO_DISCONNECTED) {
-		/* Pin has to be configured as input or output */
+	}
+
+	if ((flags & GPIO_ACTIVE_LOW) && (flags & GPIO_ACTIVE_HIGH)) {
+		/* Pin cannot be configured with both active states */
 		return -ENOTSUP;
 	}
 
@@ -133,7 +143,7 @@ static int gpio_efinix_sapphire_port_get_raw(const struct device *dev, gpio_port
 {
 	const struct gpio_efinix_sapphire_cfg *config = DEV_GPIO_CFG(dev);
 
-	*value = sys_read32(config -> base_addr);
+	*value = sys_read32(config->base_addr);
 	return 0;
 }
 
@@ -199,12 +209,43 @@ static int gpio_efinix_sapphire_init(const struct device *dev)
 {
 	const struct gpio_efinix_sapphire_cfg *config = DEV_GPIO_CFG(dev);
 
-	if (config->n_gpios > 4) {
+	if (config->n_gpios > 16) {
 		return -EINVAL;
 	}
 	return 0;
 }
+static int gpio_efinix_sapphire_pin_interrupt_configure(const struct device *dev, gpio_pin_t pin,
+							enum gpio_int_mode mode,
+							enum gpio_int_trig trig)
+{
+	const struct gpio_efinix_sapphire_cfg *config = DEV_GPIO_CFG(dev);
+#define BASE_ADDRESS config->base_addr
+	if (mode == GPIO_INT_MODE_DISABLED) {
+		return 0;
+	}
+	if (mode == GPIO_INT_MODE_LEVEL) {
+		if (trig == GPIO_INT_TRIG_HIGH) {
+			sys_set_bit(BASE_ADDRESS + BSP_GPIO_INTERRUPT_HIGH_ENABLE, pin);
+		} else if (trig == GPIO_INT_TRIG_LOW) {
+			sys_set_bit(BASE_ADDRESS + BSP_GPIO_INTERRUPT_LOW_ENABLE, pin);
+		}
+	} else if (mode == GPIO_INT_MODE_EDGE) {
+		if (trig == GPIO_INT_HIGH_1) {
+			sys_set_bit(BASE_ADDRESS + BSP_GPIO_INTERRUPT_RISE_ENABLE, pin);
+		} else if (trig == GPIO_INT_LOW_0) {
+			sys_set_bit(BASE_ADDRESS + BSP_GPIO_INTERRUPT_FALL_ENABLE, pin);
+		}
+	}
+	return 0;
+}
 
+static int gpio_efinix_sapphire_manage_callback(const struct device *dev,
+						struct gpio_callback *callback, bool set)
+{
+	struct gpio_efinix_sapphire_data *data = DEV_GPIO_DATA(dev);
+	gpio_manage_callback(&data->cb, callback, set);
+	return 0;
+}
 /* API map */
 static const struct gpio_driver_api gpio_efinix_sapphire_api = {
 	.pin_configure = gpio_efinix_sapphire_config,
@@ -213,6 +254,8 @@ static const struct gpio_driver_api gpio_efinix_sapphire_api = {
 	.port_set_bits_raw = gpio_efinix_sapphire_port_set_bits_raw,
 	.port_clear_bits_raw = gpio_efinix_sapphire_port_clear_bits_raw,
 	.port_toggle_bits = gpio_efinix_sapphire_port_toggle_bits,
+	.pin_interrupt_configure = gpio_efinix_sapphire_pin_interrupt_configure,
+	.manage_callback = gpio_efinix_sapphire_manage_callback,
 };
 
 #define GPIO_EFINIX_SAPPHIRE_INIT(n)                                                               \
